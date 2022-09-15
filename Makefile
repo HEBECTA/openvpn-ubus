@@ -7,6 +7,7 @@ PKG_VERSION:=1.0.0
 include $(INCLUDE_DIR)/package.mk
 
 define Package/openvpn-ubus
+	DEPENDS:=+libubus +libubox +libblobmsg-json
 	CATEGORY:=Base system
 	TITLE:=Openvpn ubus
 endef
