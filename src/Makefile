@@ -1,7 +1,7 @@
 BIN:=openvpn_ubus
 SRC:=$(wildcard *.c)
 OBJS:=$(SRC:.c=.o)
-LDFLAGS:=-largp -lblobmsg_json -lubox -lubus
+LDFLAGS:=-largp -lblobmsg_json -lubox -lubus -luci
 
 .PHONY: all clean
 

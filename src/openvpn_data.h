@@ -6,20 +6,18 @@
 #define CLIENT_SOCK_FILE "/tmp/run/openvpn_management.sock"
 #define BUFF_SIZE 5000
 
-int connect_openvpn();
+static int connect_openvpn(int *sockfd);
 
 int kill_client(const char *client_name);
 
 int read_connected_clients(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE]);
 
-int clean_initial_server_response();
+static int clean_initial_server_response(int sockfd);
 
-static char *recv_message_no_header(char *buff);
+static char *recv_message_no_header(int sockfd, char *buff);
 
 static int process_client(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE], char *client_token, int client_n);
 
-void disconnect_openvpn();
-
-static int sockfd;
+static void disconnect_openvpn(int sockfd);
 
 #endif
