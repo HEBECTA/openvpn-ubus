@@ -3,6 +3,7 @@
 #include "openvpn_data.h"
 
 #include <syslog.h>
+#include <errno.h>
 
 static const struct blobmsg_policy client_policy[] = {
 	[CLIENT_NAME] = { .name = "client_name", .type = BLOBMSG_TYPE_STRING },
@@ -31,27 +32,41 @@ static int clients_get(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_buf temp = {};
 	
 	blob_buf_init(&b, 0);
-	
-        char clients_data[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE];
-        int clients_n = read_connected_clients(clients_data);
-	if ( clients_n < 0 )
-		syslog(LOG_ERR, "Openvpn-ubus: Failed to get clients");
 
-	for ( int i = 0; i < clients_n; ++i ){
+	struct wrapper *wrp = container_of(obj, struct wrapper, ubus);
+	if ( wrp == NULL ){
+
+		syslog(LOG_NOTICE, "Openvpn-ubus: Failed to access clients data");
+		return EFAULT;
+	}
+
+	// critical section	S T A R T
+	pthread_mutex_lock(wrp->hash_table_mutex);
+
+	struct hash_table_iterator it;
+
+	init_hash_table_iterator(wrp->ht, &it);
+
+	while ( hash_table_return_next(&it) ){
 
 		blob_buf_init(&temp, 0);
 
-		blobmsg_add_string(&temp, "Real Address", clients_data[i][1]);
-		blobmsg_add_string(&temp, "Virtual Address", clients_data[i][2]);
-		blobmsg_add_string(&temp, "Virtual IPv6 Address", clients_data[i][3]);
-		blobmsg_add_string(&temp, "Bytes Received", clients_data[i][4]);
-		blobmsg_add_string(&temp, "Bytes Sent", clients_data[i][5]);
-		blobmsg_add_string(&temp, "Connected Since", clients_data[i][6]);
+		blobmsg_add_string(&temp, "Real Address", it.current_node->real_address);
+		blobmsg_add_string(&temp, "Virtual Address", it.current_node->virtual_address_v4);
+		blobmsg_add_string(&temp, "Virtual IPv6 Address", it.current_node->virtual_address_v6);
+		blobmsg_add_u32(&temp, "Bytes Received", it.current_node->bytes_received);
+		blobmsg_add_u32(&temp, "Bytes Sent", it.current_node->bytes_sent);
+		blobmsg_add_string(&temp, "Connected Since", it.current_node->connected_since);
 
-		blobmsg_add_field(&b, BLOBMSG_TYPE_TABLE, clients_data[i][0], blob_data(temp.head), blob_len(temp.head));
+		blobmsg_add_field(&b, BLOBMSG_TYPE_TABLE, it.current_node->name, blob_data(temp.head), blob_len(temp.head));
 
 		blob_buf_free(&temp);
 	}
+
+	pthread_mutex_unlock(wrp->hash_table_mutex);
+	// critical section	E N D
+	
+EXIT_CLIENT_GET_FUN:
 
 	ubus_send_reply(ctx, req, b.head);
 	blob_buf_free(&b);
@@ -67,12 +82,25 @@ static int client_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_buf b = {};
 
 	blobmsg_parse(client_policy, __CLIENT_MAX, tb, blob_data(msg), blob_len(msg));
+
+	struct wrapper *wrp = container_of(obj, struct wrapper, ubus);
+	if ( wrp == NULL ){
+
+		syslog(LOG_ERR, "Openvpn-ubus: Failed to access clients data");
+		return EFAULT;
+	}
 	
 	if (!tb[CLIENT_NAME])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	if ( kill_client(blobmsg_get_string(tb[CLIENT_NAME])) )
+	// critical section	S T A R T
+	pthread_mutex_lock(wrp->hash_table_mutex);
+
+	if ( kill_client(wrp->ht, blobmsg_get_string(tb[CLIENT_NAME])) )
 		syslog(LOG_ERR, "Openvpn-ubus: Failed to kill client %s", blobmsg_get_string(tb[CLIENT_NAME]));
+
+	pthread_mutex_unlock(wrp->hash_table_mutex);
+	// critical section	E N D
 
 	blob_buf_init(&b, 0);
 
@@ -84,7 +112,7 @@ static int client_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
-int init_start_ubus(struct ubus_context *ctx, const char *server_name){
+int init_start_ubus(struct ubus_context *ctx, const char *server_name, struct hash_table *ht, pthread_mutex_t *hash_table_mutex){
 
 	int server_name_len = strlen(server_name);
 
@@ -104,12 +132,18 @@ int init_start_ubus(struct ubus_context *ctx, const char *server_name){
 	if ( server_name_len + strlen(ubus_service_name) < UBUS_SERVICE_NAME_SIZE ){
 
 		strncat(ubus_service_name, server_name, strlen(ubus_service_name) + server_name_len);
+		ubus_service_name[UBUS_SERVICE_NAME_SIZE-1] = '\0';
 		openvpn_object.name = ubus_service_name;
 	}
 
 	// *********************************************************
 
-	ubus_add_object(ctx, &openvpn_object);
+	struct wrapper wrp;
+	wrp.ubus = openvpn_object;
+	wrp.ht = ht;
+	wrp.hash_table_mutex = hash_table_mutex;
+
+	ubus_add_object(ctx, &wrp.ubus);
 	uloop_run();
 
 	return 0;

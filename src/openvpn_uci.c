@@ -1,15 +1,14 @@
 #include "openvpn_uci.h"
 
 #include <errno.h>
+#include <string.h>
 
 static struct uci_context* init_uci(const char *file, struct uci_package **pkg){
 
         struct uci_context *ctx = NULL;
         ctx = uci_alloc_context();
-        if (ctx == NULL) {
-		
+        if (ctx == NULL) 
                 return NULL;
-	}
 
         int rc = uci_set_confdir(ctx, CONFIG_PATH);
         if ( rc ){

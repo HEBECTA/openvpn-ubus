@@ -5,6 +5,15 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
+
+void sig_handler(int signum){
+
+  thread_run = 0;
+
+  syslog(LOG_NOTICE, "Openvpn-ubus: Received a SIGINT signal. Terminating program\n");
+}
+
 
 static int connect_openvpn(int *sockfd){
 
@@ -31,7 +40,7 @@ static int connect_openvpn(int *sockfd){
         return 0;
 }
 
-int kill_client(const char *client_name){
+int kill_client(struct hash_table *ht, const char *client_name){
 
         int rc = 0;
 
@@ -62,6 +71,13 @@ int kill_client(const char *client_name){
                 goto EXIT_KILL_CLIENT_FUN;
         }
 
+        rc = delete_client(ht, client_name);
+        if ( rc ){
+
+                syslog(LOG_ERR, "Openvpn-ubus: Failed to delete client from data buffer");
+                goto EXIT_KILL_CLIENT_FUN;
+        }
+
         syslog(LOG_NOTICE, "Openvpn-ubus: Killed %s\n", client_name);
 
 EXIT_KILL_CLIENT_FUN:
@@ -71,11 +87,11 @@ EXIT_KILL_CLIENT_FUN:
         return 0;
 }
 
-int read_connected_clients(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE]){
+int read_connected_clients(struct hash_table *ht){
+
+        int rc = 0;
 
         const char *command = "status 2\n";
-
-        int clients_n = 0;
 
         char readBuff[BUFF_SIZE];
         const char *delim = "\n";
@@ -91,25 +107,20 @@ int read_connected_clients(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_
         send(sockfd, command, strlen(command), 0);
 
         it = recv_message_no_header(sockfd, readBuff);
-        if ( it == NULL ){
-
-                clients_n = -1;
+        if ( it == NULL ) // NULL -> no clients
                 goto EXIT_READ_CLIENTS_FUN;
-        }
 
         token = strtok(it, delim);
 
-        while( token != NULL && strstr(token, "CLIENT_LIST") != NULL ) {
+        while( token != NULL && strstr(token, "CLIENT_LIST") != NULL ){
 
-                if ( process_client(buff, token, clients_n) ){
+                if ( process_client(ht, token) ){
 
                         syslog(LOG_ERR, "Openvpn-ubus: Failed to process client data from openvpn server");
-                        clients_n = -1;
+                        rc = ENOSR;
                         goto EXIT_READ_CLIENTS_FUN;
                 }
-
-                ++clients_n;
-           
+  
                 token = strtok(NULL, delim);
         }
 
@@ -117,7 +128,7 @@ EXIT_READ_CLIENTS_FUN:
 
         disconnect_openvpn(sockfd);
 
-        return clients_n;
+        return rc;
 }
 
 static int clean_initial_server_response(int sockfd){
@@ -145,14 +156,18 @@ static char *recv_message_no_header(int sockfd, char *buff){
         return buff;
 }
 
-static int process_client(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE], char *client_token, int client_n){
+static int process_client(struct hash_table *ht, char *client_token){
 
+        int rc = 0;
+
+        char client_buff[MAX_ATTRIBUTES][MAX_ATTRIBUTE_SIZE];
         char delim = ',';
 
         char *it_start = strchr(client_token, delim);
         char *it_end;
 
-        for ( int i = 0; it_start != NULL && i < MAX_ATTRIBUTES; ++i ){
+        int i = 0;
+        for ( ; it_start != NULL && i < MAX_ATTRIBUTES; ++i ){
 
                 it_start += sizeof(char);
 
@@ -160,18 +175,69 @@ static int process_client(char buff[MAX_CLIENTS][MAX_ATTRIBUTES][MAX_ATTRIBUTE_S
 
                 if ( (it_end - it_start) < MAX_ATTRIBUTE_SIZE ) {
 
-                        strncpy(buff[client_n][i], it_start, (it_end - it_start) );
-                        buff[client_n][i][(it_end - it_start)] = '\0';
+                        strncpy(client_buff[i], it_start, (it_end - it_start) );
+                        client_buff[i][(it_end - it_start)] = '\0';
                 }
 
                 it_start = strchr(it_start, delim);
         }
+        
+        if ( i < MAX_ATTRIBUTES )
+                return ENOSR;
 
-        return 0;
+        struct node *client = get_client(ht, client_buff[0]);
+        if ( client == NULL ){
+
+                rc = insert_client(ht, client_buff[0], client_buff[1], client_buff[2], client_buff[3], client_buff[4], client_buff[5], client_buff[6]);
+
+                if ( !rc )
+                        syslog(LOG_NOTICE, "Openvpn-ubus: Connected %s\n", client_buff[0]);
+        }
+                
+
+        else 
+                update_client(client, client_buff[1], client_buff[2], client_buff[3], client_buff[4], client_buff[5], client_buff[6]);
+
+        return rc;
 }
-
 
 static void disconnect_openvpn(int sockfd){
 
         close(sockfd);
+}
+
+void *read_clients_in_time_interval(void *vargp){
+
+        signal(SIGTERM, sig_handler);
+
+        thread_run = 1;
+
+        struct wrapped_ht_mutex *wrp = (struct wrapped_ht_mutex *) vargp;
+
+        while ( thread_run ){
+
+                // critical section	S T A R T
+	        pthread_mutex_lock(wrp->hash_table_mutex);
+
+                int rc = read_connected_clients(wrp->hash_table);
+
+                pthread_mutex_unlock(wrp->hash_table_mutex);
+	        // critical section	E N D
+
+                if ( rc < 0 )
+                        syslog(LOG_ERR, "Openvpn-ubus: Failed to get clients from openvpn server");
+
+                sleep(READ_TIME_INTERVAL);
+        }
+
+        return NULL;
+}
+
+int init_data_read_thread(pthread_t *thread_id, struct wrapped_ht_mutex *wrp){
+
+        int rc = 0;
+
+        rc = pthread_create(thread_id, NULL, read_clients_in_time_interval, (void *)wrp);
+
+        return rc;
 }

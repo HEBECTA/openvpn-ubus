@@ -4,13 +4,17 @@ USE_PROCD=1
 
 start_service(){
 
+        FILE=/tmp/run/openvpn_management.sock
+
+        [ -f "$FILE" ] && return 
+
         config_load 'openvpn_ubus'
         config_get enabled openvpn_ubus_info 'enable' '0'
 
         config_load 'openvpn'
         config_get srv_enabled serveris 'enable' '0'
        
-        if [ "$enabled" -eq 1 && "$srv_enabled" -eq 1 ]; then
+        if [ "$enabled" -eq 1 ] && [ "$srv_enabled" -eq 1 ]; then
                 procd_open_instance
                 procd_set_param stderr 1
                 procd_set_param command /usr/bin/openvpn_ubus
@@ -19,7 +23,6 @@ start_service(){
                 procd_close_instance
         fi
 }
-
 
 service_triggers() {
         procd_add_reload_trigger "openvpn_ubus"
